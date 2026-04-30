@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Studio Chats — Fashion project rooms</title>
+
+    <!-- Ensure hash routing starts at / -->
+    <script>
+      (function () {
+        var h = location.hash;
+        if (h === "" || h === "#") {
+          location.hash = "#/";
+        }
+      })();
+    </script>
+
+    <link rel="stylesheet" href="style.css" />
+
+    <!-- ✅ FIXED IMPORT MAP -->
+    <script type="importmap">
+      {
+        "imports": {
+          "vue": "https://cdn.jsdelivr.net/npm/vue@3.5.32/dist/vue.esm-browser.js",
+          "vue-router": "https://cdn.jsdelivr.net/npm/vue-router@4.5.0/dist/vue-router.esm-browser.js",
+          "@vue/devtools-api": "https://cdn.jsdelivr.net/npm/@vue/devtools-api@6.6.4/lib/esm/index.js",
+          "@graffiti-garden/implementation-local": "https://cdn.jsdelivr.net/npm/@graffiti-garden/implementation-local@1.2.0/dist/browser/index.js",
+          "@graffiti-garden/wrapper-vue": "https://cdn.jsdelivr.net/npm/@graffiti-garden/wrapper-vue@1.2.2/dist/browser/plugin.mjs"
+        }
+      }
+    </script>
+  </head>
+
+  <body>
+    <noscript>Turn on JavaScript to use Studio Chats.</noscript>
+
+    <!-- Boot message -->
+    <p
+      id="static-boot"
+      style="
+        margin: 0;
+        padding: 10px 14px;
+        background: #1a1a1a;
+        color: #ffeb3b;
+        font:
+          14px/1.4 system-ui,
+          sans-serif;
+      "
+    >
+      <strong>Studio Chats</strong> — loading… If this never disappears, open
+      DevTools (F12 → Console).
+    </p>
+
+    <!-- Vue mounts here -->
+    <div id="app"></div>
+
+    <!-- Load app -->
+    <script type="module">
+      import("./index.js")
+        .then(() => {
+          document.getElementById("static-boot")?.remove();
+        })
+        .catch((err) => {
+          console.error(err);
+          document.getElementById("static-boot")?.remove();
+
+          const root = document.getElementById("app");
+          if (!root) return;
+
+          root.innerHTML = "";
+
+          const wrap = document.createElement("div");
+          wrap.style.cssText =
+            "max-width:40rem;margin:2rem auto;padding:1rem;font-family:system-ui,sans-serif;line-height:1.5";
+
+          const h1 = document.createElement("h1");
+          h1.style.fontSize = "1.25rem";
+          h1.textContent = "Could not load Studio Chats";
+
+          const p = document.createElement("p");
+          p.textContent =
+            "Make sure you're running a server (python3 -m http.server 8000) and open http://localhost:8000/#/. Check the Console for errors.";
+
+          const pre = document.createElement("pre");
+          pre.style.cssText =
+            "background:#f4f4f4;padding:0.75rem;overflow:auto;font-size:0.8rem;white-space:pre-wrap";
+
+          pre.textContent =
+            err && (err.stack || err.message)
+              ? err.stack || err.message
+              : String(err);
+
+          wrap.append(h1, p, pre);
+          root.append(wrap);
+        });
+    </script>
+  </body>
+</html>

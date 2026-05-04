@@ -6,7 +6,7 @@ import {
   RouterLink,
   useRouter,
 } from "vue-router";
-import { GraffitiLocal } from "@graffiti-garden/implementation-local";
+import { GraffitiDecentralized } from "@graffiti-garden/implementation-decentralized";
 import {
   GraffitiPlugin,
   useGraffiti,
@@ -46,48 +46,22 @@ const messageSchema = {
   },
 };
 
-const pinSchema = {
-  properties: {
-    value: {
-      required: [
-        "type",
-        "pinId",
-        "chatId",
-        "messageId",
-        "pinnedAt",
-        "pinnedBy",
-      ],
-      properties: {
-        type: { const: "pin_message" },
-        pinId: { type: "string" },
-        chatId: { type: "string" },
-        messageId: { type: "string" },
-        pinnedAt: { type: "number" },
-        pinnedBy: { type: "string" },
-      },
-    },
-  },
-};
-
 const CHATS_CHANNELS = ["chats"];
 const MESSAGES_CHANNELS = ["messages"];
-const PINS_CHANNELS = ["pins"];
 
 const MessageBubble = defineComponent({
   name: "MessageBubble",
   props: {
     message: { type: Object, required: true },
-    canPin: { type: Boolean, default: false },
-    isPinned: { type: Boolean, default: false },
+    isOwn: { type: Boolean, default: false },
   },
-  emits: ["pin"],
   setup() {
     function formatTime(ts) {
       if (ts == null) return "";
       try {
         return new Date(ts).toLocaleString(undefined, {
-          dateStyle: "short",
-          timeStyle: "short",
+          hour: "numeric",
+          minute: "2-digit",
         });
       } catch {
         return "";
@@ -96,20 +70,11 @@ const MessageBubble = defineComponent({
     return { formatTime };
   },
   template: `
-    <div class="bubble">
-      <div class="who">{{ message.value.createdBy }}</div>
-      <div class="text">{{ message.value.content }}</div>
-      <div class="when">{{ formatTime(message.value.createdAt) }}</div>
-      <div v-if="canPin" style="margin-top: 0.5rem">
-        <button
-          v-if="!isPinned"
-          type="button"
-          class="ghost"
-          @click="$emit('pin', message)"
-        >
-          Pin
-        </button>
-        <button v-else type="button" class="ghost" disabled>Pinned</button>
+    <div class="bubble" :class="isOwn ? 'bubble--own' : 'bubble--other'">
+      <div v-if="!isOwn" class="who">{{ message.value.createdBy }}</div>
+      <p class="text">{{ message.value.content }}</p>
+      <div class="bubble-meta">
+        <span class="when">{{ formatTime(message.value.createdAt) }}</span>
       </div>
     </div>
   `,
@@ -117,41 +82,13 @@ const MessageBubble = defineComponent({
 
 const HomeView = defineComponent({
   name: "HomeView",
-  setup() {
-    const { objects, isFirstPoll } = useGraffitiDiscover(
-      CHATS_CHANNELS,
-      chatSchema,
-    );
-    const chats = computed(() => {
-      const byId = new Map();
-      for (const obj of objects.value) {
-        const v = obj.value;
-        if (!v || v.type !== "create_chat") continue;
-        const prev = byId.get(v.chatId);
-        const prevAt = prev?.value?.createdAt ?? 0;
-        const at = v.createdAt ?? 0;
-        if (!prev || at >= prevAt) byId.set(v.chatId, obj);
-      }
-      return [...byId.values()].sort(
-        (a, b) => (b.value.createdAt ?? 0) - (a.value.createdAt ?? 0),
-      );
-    });
-    return { chats, isFirstPoll };
-  },
   template: `
-    <main class="card">
-      <h2>Your chats</h2>
-      <p v-if="isFirstPoll && chats.length === 0" class="hint">Loading chats…</p>
-      <p v-else-if="chats.length === 0" class="empty">No chats yet. Start one from New Chat.</p>
-      <ul v-else class="chat-list">
-        <li v-for="obj in chats" :key="obj.url">
-          <router-link :to="'/chat/' + obj.value.chatId">
-            <div class="name">{{ obj.value.name }}</div>
-            <div class="meta">Room ID · {{ obj.value.chatId.slice(0, 8) }}…</div>
-          </router-link>
-        </li>
-      </ul>
-    </main>
+    <div class="chat-panel-empty">
+      <div>
+        <p class="chat-panel-empty-title">Studio Chats</p>
+        <p class="chat-panel-empty-text">Select a chat to start messaging</p>
+      </div>
+    </div>
   `,
 });
 
@@ -206,19 +143,25 @@ const NewChatView = defineComponent({
     return { session, name, busy, error, submit };
   },
   template: `
-    <main class="card">
-      <h2>New chat</h2>
-      <p v-if="session === undefined" class="hint">Loading…</p>
-      <p v-else-if="session === null" class="hint">Log in from the header to create a chat.</p>
-      <form v-else class="stacked" @submit.prevent="submit">
-        <label>
-          Chat name
-          <input v-model="name" type="text" autocomplete="off" placeholder="e.g. Capsule collection — fittings" />
-        </label>
-        <p v-if="error" class="hint">{{ error }}</p>
-        <button type="submit" class="primary" :disabled="busy">{{ busy ? 'Creating…' : 'Create chat' }}</button>
-      </form>
-    </main>
+    <div class="chat-panel-static">
+      <div class="chat-panel-static-inner">
+        <h2>New chat</h2>
+        <p v-if="session === undefined" class="hint">Loading…</p>
+        <p v-else-if="session === null" class="hint">Log in from the sidebar to create a chat.</p>
+        <form v-else @submit.prevent="submit">
+          <label for="new-chat-name">Chat name</label>
+          <input
+            id="new-chat-name"
+            v-model="name"
+            type="text"
+            autocomplete="off"
+            placeholder="e.g. Team sync"
+          />
+          <p v-if="error" class="hint">{{ error }}</p>
+          <button type="submit" class="btn btn-primary" :disabled="busy">{{ busy ? 'Creating…' : 'Create chat' }}</button>
+        </form>
+      </div>
+    </div>
   `,
 });
 
@@ -262,11 +205,6 @@ const ChatView = defineComponent({
       true,
     );
 
-    const { objects: pinObjects } = useGraffitiDiscover(
-      PINS_CHANNELS,
-      pinSchema,
-    );
-
     const thread = computed(() =>
       objects.value
         .filter((o) => o.value?.chatId === props.chatId)
@@ -275,84 +213,6 @@ const ChatView = defineComponent({
             (a.value.createdAt ?? 0) - (b.value.createdAt ?? 0),
         ),
     );
-
-    const pinnedMessageIds = computed(() => {
-      const ids = new Set();
-      for (const o of pinObjects.value) {
-        const v = o.value;
-        if (v?.type === "pin_message" && v.chatId === props.chatId) {
-          ids.add(v.messageId);
-        }
-      }
-      return ids;
-    });
-
-    const pinnedRows = computed(() => {
-      const threadById = new Map(
-        thread.value.map((m) => [m.value.messageId, m]),
-      );
-      const pins = pinObjects.value.filter(
-        (o) =>
-          o.value?.type === "pin_message" &&
-          o.value?.chatId === props.chatId,
-      );
-      const bestPinByMessage = new Map();
-      for (const pin of pins) {
-        const mid = pin.value.messageId;
-        const cur = bestPinByMessage.get(mid);
-        if (
-          !cur ||
-          (pin.value.pinnedAt ?? 0) >= (cur.value.pinnedAt ?? 0)
-        ) {
-          bestPinByMessage.set(mid, pin);
-        }
-      }
-      return [...bestPinByMessage.values()]
-        .sort(
-          (a, b) =>
-            (b.value.pinnedAt ?? 0) - (a.value.pinnedAt ?? 0),
-        )
-        .map((pin) => ({
-          pin,
-          message: threadById.get(pin.value.messageId) ?? null,
-        }));
-    });
-
-    function formatTime(ts) {
-      if (ts == null) return "";
-      try {
-        return new Date(ts).toLocaleString(undefined, {
-          dateStyle: "short",
-          timeStyle: "short",
-        });
-      } catch {
-        return "";
-      }
-    }
-
-    async function onPinMessage(msg) {
-      const s = session.value;
-      if (!s?.actor) return;
-      if (pinnedMessageIds.value.has(msg.value.messageId)) return;
-      try {
-        await graffiti.post(
-          {
-            value: {
-              type: "pin_message",
-              pinId: crypto.randomUUID(),
-              chatId: props.chatId,
-              messageId: msg.value.messageId,
-              pinnedAt: Date.now(),
-              pinnedBy: s.actor,
-            },
-            channels: PINS_CHANNELS,
-          },
-          s,
-        );
-      } catch (e) {
-        console.error(e);
-      }
-    }
 
     async function send() {
       error.value = "";
@@ -388,83 +248,100 @@ const ChatView = defineComponent({
       }
     }
 
+    function onComposerKeydown(e) {
+      if (e.key !== "Enter" || e.shiftKey) return;
+      e.preventDefault();
+      send();
+    }
+
+    const headerInitial = computed(() => {
+      const n = chatName.value;
+      if (typeof n === "string" && n.length > 0) {
+        return n.slice(0, 1).toUpperCase();
+      }
+      const id = props.chatId;
+      return (id && id[0] ? id[0] : "?").toUpperCase();
+    });
+
     return {
       session,
       content,
       busy,
       error,
       chatName,
+      headerInitial,
       thread,
       isFirstPoll,
-      pinnedRows,
-      pinnedMessageIds,
-      formatTime,
-      onPinMessage,
       send,
+      onComposerKeydown,
     };
   },
   template: `
-    <main class="card">
-      <h2>{{ chatName || 'Chat' }}</h2>
-      <p class="hint">Room <code>{{ chatId }}</code></p>
+    <div class="chat-room">
+      <header class="chat-header">
+        <div class="chat-header-avatar" aria-hidden="true">{{ headerInitial }}</div>
+        <div class="chat-header-text">
+          <h2 class="chat-header-title">{{ chatName || 'Chat' }}</h2>
+          <p class="chat-header-sub">Room <code>{{ chatId }}</code></p>
+        </div>
+      </header>
 
-      <div style="margin-bottom: 1.25rem">
-        <h3 style="margin: 0 0 0.5rem; font-size: 1rem; font-weight: 600">Pinned messages</h3>
-        <p v-if="pinnedRows.length === 0" class="hint">No pinned messages yet.</p>
-        <div v-else class="messages" style="max-height: min(36vh, 280px); margin-bottom: 0">
-          <div v-for="row in pinnedRows" :key="row.pin.url" class="bubble">
-            <template v-if="row.message">
-              <div class="who">{{ row.message.value.createdBy }}</div>
-              <div class="text">{{ row.message.value.content }}</div>
-              <div class="when">{{ formatTime(row.message.value.createdAt) }}</div>
-            </template>
-            <template v-else>
-              <div class="who">Pinned</div>
-              <div class="text">Original message is not in this thread.</div>
-              <div class="when">{{ formatTime(row.pin.value.pinnedAt) }}</div>
-            </template>
+      <div class="chat-messages-wrap">
+        <p v-if="isFirstPoll && thread.length === 0" class="chat-messages-status">Loading messages…</p>
+        <p v-else-if="thread.length === 0" class="chat-messages-status">No messages yet. Say hello below.</p>
+        <div v-else class="chat-messages">
+          <div
+            v-for="m in thread"
+            :key="m.url"
+            class="message-row"
+            :class="session?.actor === m.value.createdBy ? 'message-row--own' : 'message-row--other'"
+          >
+            <MessageBubble
+              :message="m"
+              :is-own="session?.actor === m.value.createdBy"
+            />
           </div>
         </div>
       </div>
 
-      <p v-if="isFirstPoll && thread.length === 0" class="hint">Loading messages…</p>
-      <div v-else-if="thread.length === 0" class="empty messages">No messages yet. Say hello below.</div>
-      <div v-else class="messages">
-        <MessageBubble
-          v-for="m in thread"
-          :key="m.url"
-          :message="m"
-          :can-pin="!!session?.actor"
-          :is-pinned="pinnedMessageIds.has(m.value.messageId)"
-          @pin="onPinMessage"
-        />
-      </div>
-      <p v-if="session === undefined" class="hint">Loading session…</p>
-      <p v-else-if="session === null" class="hint">Log in to send a message.</p>
-      <form v-else class="stacked" @submit.prevent="send">
-        <label>
-          Message
-          <textarea v-model="content" placeholder="Share feedback, links, or decisions…"></textarea>
-        </label>
-        <p v-if="error" class="hint">{{ error }}</p>
-        <button type="submit" class="primary" :disabled="busy">{{ busy ? 'Sending…' : 'Send' }}</button>
-      </form>
-    </main>
+      <footer class="chat-composer">
+        <p v-if="session === undefined" class="composer-hint">Loading session…</p>
+        <p v-else-if="session === null" class="composer-hint">Log in to send a message.</p>
+        <template v-else>
+          <form class="composer-form" @submit.prevent="send">
+            <textarea
+              v-model="content"
+              class="composer-input"
+              placeholder="Type a message"
+              aria-label="Message"
+              rows="1"
+              @keydown="onComposerKeydown"
+            ></textarea>
+            <button type="submit" class="composer-send btn btn-primary" :disabled="busy">
+              {{ busy ? '…' : 'Send' }}
+            </button>
+          </form>
+          <p v-if="error" class="composer-error">{{ error }}</p>
+        </template>
+      </footer>
+    </div>
   `,
 });
 
 const AboutView = defineComponent({
   name: "AboutView",
   template: `
-    <main class="card about">
-      <h2>About</h2>
-      <p>
-        This app helps fashion design students organize project chats, feedback, and design decisions.
-      </p>
-      <p>
-        Chats and messages are stored with Graffiti so you can keep a lightweight trail of studio conversation alongside your work.
-      </p>
-    </main>
+    <div class="chat-panel-static">
+      <div class="chat-panel-static-inner">
+        <h2>About</h2>
+        <p>
+          Studio Chats uses Graffiti for shared chats and messages.
+        </p>
+        <p>
+          Pick a room from the list or start a new chat from the sidebar.
+        </p>
+      </div>
+    </div>
   `,
 });
 
@@ -473,6 +350,25 @@ const App = defineComponent({
   setup() {
     const session = useGraffitiSession();
     const graffiti = useGraffiti();
+
+    const { objects, isFirstPoll } = useGraffitiDiscover(
+      CHATS_CHANNELS,
+      chatSchema,
+    );
+    const chats = computed(() => {
+      const byId = new Map();
+      for (const obj of objects.value) {
+        const v = obj.value;
+        if (!v || v.type !== "create_chat") continue;
+        const prev = byId.get(v.chatId);
+        const prevAt = prev?.value?.createdAt ?? 0;
+        const at = v.createdAt ?? 0;
+        if (!prev || at >= prevAt) byId.set(v.chatId, obj);
+      }
+      return [...byId.values()].sort(
+        (a, b) => (b.value.createdAt ?? 0) - (a.value.createdAt ?? 0),
+      );
+    });
 
     async function onLogin() {
       await graffiti.login();
@@ -483,33 +379,58 @@ const App = defineComponent({
       if (s) await graffiti.logout(s);
     }
 
-    return { session, onLogin, onLogout };
+    return { session, onLogin, onLogout, chats, isFirstPoll };
   },
   template: `
-    <div>
-      <header class="app-header">
-        <router-link class="brand" to="/">
-          <h1>Studio Chats</h1>
-          <p>Fashion design project rooms</p>
-        </router-link>
-        <div class="session">
-          <span v-if="session === undefined" class="muted">Loading…</span>
-          <template v-else-if="session === null">
-            <span class="muted">Signed out</span>
-            <button type="button" class="primary" @click="onLogin">Log in</button>
-          </template>
-          <template v-else>
-            <span class="muted">Signed in as <code>{{ session.actor }}</code></span>
-            <button type="button" class="ghost" @click="onLogout">Log out</button>
-          </template>
+    <div class="chat-app-shell">
+      <aside class="sidebar" aria-label="Chats">
+        <div class="sidebar-header">
+          <h1 class="sidebar-title">
+            <router-link to="/">Studio Chats</router-link>
+          </h1>
+          <div class="sidebar-session">
+            <template v-if="session === undefined">
+              <span>Loading…</span>
+            </template>
+            <template v-else-if="session === null">
+              <span>Signed out</span>
+              <button type="button" class="btn btn-primary" @click="onLogin">Log in</button>
+            </template>
+            <template v-else>
+              <span>As <code>{{ session.actor }}</code></span>
+              <button type="button" class="btn btn-ghost" @click="onLogout">Log out</button>
+            </template>
+          </div>
+          <router-link to="/newchat" class="sidebar-new" active-class="router-link-active">
+            New Chat
+          </router-link>
         </div>
-      </header>
-      <nav class="primary">
-        <router-link to="/">Home</router-link>
-        <router-link to="/newchat">New Chat</router-link>
-        <router-link to="/about">About</router-link>
-      </nav>
-      <router-view style="margin-top:1.25rem;" />
+        <div class="sidebar-chats">
+          <p v-if="isFirstPoll && chats.length === 0" class="sidebar-hint">Loading chats…</p>
+          <p v-else-if="chats.length === 0" class="sidebar-hint">No chats yet. Use New Chat.</p>
+          <ul v-else class="chat-list">
+            <li v-for="obj in chats" :key="obj.url">
+              <router-link
+                :to="'/chat/' + obj.value.chatId"
+                class="chat-row"
+                active-class="is-active"
+              >
+                <div class="chat-avatar">{{ (obj.value.name || obj.value.chatId || '?').slice(0, 1).toUpperCase() }}</div>
+                <div class="chat-row-body">
+                  <div class="chat-row-title">{{ obj.value.name }}</div>
+                  <div class="chat-row-preview">Room {{ obj.value.chatId.slice(0, 8) }}…</div>
+                </div>
+              </router-link>
+            </li>
+          </ul>
+        </div>
+        <div class="sidebar-footer">
+          <router-link to="/about">About</router-link>
+        </div>
+      </aside>
+      <main class="chat-panel">
+        <router-view />
+      </main>
     </div>
   `,
 });
@@ -546,7 +467,7 @@ try {
     root.append(pre);
   };
   app
-    .use(GraffitiPlugin, { graffiti: new GraffitiLocal() })
+    .use(GraffitiPlugin, { graffiti: new GraffitiDecentralized() })
     .use(router)
     .mount("#app");
   nextTick(() => {

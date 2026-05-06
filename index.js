@@ -5,6 +5,7 @@ import {
   ref,
   nextTick,
   onBeforeUnmount,
+  onMounted,
   watch,
 } from "vue";
 import {
@@ -142,6 +143,8 @@ const CHATS_CHANNELS = ["chats"];
 const MESSAGES_CHANNELS = ["messages"];
 const PINS_CHANNELS = ["pins"];
 const PROFILES_CHANNELS = ["profiles"];
+const DESIGN_VERSIONS_CHANNELS = ["design_versions"];
+const DESIGN_COMMENTS_CHANNELS = ["design_comments"];
 
 const profileSchema = {
   properties: {
@@ -206,6 +209,103 @@ const pinsDiscoverSchema = {
         pinSchema.properties.value,
         unpinSchema.properties.value,
       ],
+    },
+  },
+};
+
+const createDesignVersionSchema = {
+  properties: {
+    value: {
+      required: [
+        "type",
+        "versionId",
+        "chatId",
+        "title",
+        "notes",
+        "imageDataUrl",
+        "status",
+        "tags",
+        "createdAt",
+        "createdBy",
+      ],
+      properties: {
+        type: { const: "create_design_version" },
+        versionId: { type: "string" },
+        chatId: { type: "string" },
+        title: { type: "string" },
+        notes: { type: "string" },
+        imageDataUrl: { type: "string" },
+        status: {
+          enum: ["approved", "needs_revision", "archived", "draft"],
+        },
+        tags: {
+          type: "array",
+          items: { type: "string" },
+        },
+        createdAt: { type: "number" },
+        createdBy: { type: "string" },
+      },
+    },
+  },
+};
+
+const updateDesignVersionStatusSchema = {
+  properties: {
+    value: {
+      required: [
+        "type",
+        "versionId",
+        "chatId",
+        "status",
+        "updatedAt",
+        "updatedBy",
+      ],
+      properties: {
+        type: { const: "update_design_version_status" },
+        versionId: { type: "string" },
+        chatId: { type: "string" },
+        status: {
+          enum: ["approved", "needs_revision", "archived", "draft"],
+        },
+        updatedAt: { type: "number" },
+        updatedBy: { type: "string" },
+      },
+    },
+  },
+};
+
+const designVersionsDiscoverSchema = {
+  properties: {
+    value: {
+      oneOf: [
+        createDesignVersionSchema.properties.value,
+        updateDesignVersionStatusSchema.properties.value,
+      ],
+    },
+  },
+};
+
+const designCommentSchema = {
+  properties: {
+    value: {
+      required: [
+        "type",
+        "commentId",
+        "versionId",
+        "chatId",
+        "content",
+        "createdAt",
+        "createdBy",
+      ],
+      properties: {
+        type: { const: "create_design_comment" },
+        commentId: { type: "string" },
+        versionId: { type: "string" },
+        chatId: { type: "string" },
+        content: { type: "string" },
+        createdAt: { type: "number" },
+        createdBy: { type: "string" },
+      },
     },
   },
 };
@@ -328,6 +428,83 @@ function mergeChatMeta(chatId, chatObjects) {
     roomId: chatId,
     isGroup: members.length > 2,
   };
+}
+
+/**
+ * Effective design versions for one chat: latest create + latest status update per versionId.
+ * Sorted newest first by createdAt.
+ */
+function mergeDesignVersions(versionObjects) {
+  const creates = new Map();
+  for (const o of versionObjects) {
+    const v = o.value;
+    if (!v || v.type !== "create_design_version" || !v.versionId) continue;
+    creates.set(v.versionId, { ...v });
+  }
+  const statusBest = new Map();
+  for (const o of versionObjects) {
+    const v = o.value;
+    if (!v || v.type !== "update_design_version_status" || !v.versionId) continue;
+    const cur = statusBest.get(v.versionId);
+    const at = v.updatedAt ?? 0;
+    if (!cur || at >= (cur.updatedAt ?? 0)) {
+      statusBest.set(v.versionId, {
+        status: v.status,
+        updatedAt: at,
+        updatedBy: v.updatedBy,
+      });
+    }
+  }
+  const out = [];
+  for (const [versionId, base] of creates) {
+    const st = statusBest.get(versionId);
+    out.push({
+      ...base,
+      versionId,
+      status: st ? st.status : base.status,
+    });
+  }
+  out.sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
+  return out;
+}
+
+/** Comments for one version, oldest first (full Graffiti objects). */
+function commentsForVersion(commentObjects, versionId) {
+  const rows = [];
+  for (const o of commentObjects) {
+    const v = o.value;
+    if (!v || v.type !== "create_design_comment") continue;
+    if (v.versionId !== versionId) continue;
+    rows.push(o);
+  }
+  rows.sort(
+    (a, b) =>
+      (a.value.createdAt ?? 0) - (b.value.createdAt ?? 0),
+  );
+  return rows;
+}
+
+function commentCountForVersion(commentObjects, chatId, versionId) {
+  let n = 0;
+  for (const o of commentObjects) {
+    const v = o.value;
+    if (
+      v?.type === "create_design_comment" &&
+      v.chatId === chatId &&
+      v.versionId === versionId
+    ) {
+      n++;
+    }
+  }
+  return n;
+}
+
+function parseCommaTags(s) {
+  if (typeof s !== "string" || !s.trim()) return [];
+  return s
+    .split(",")
+    .map((t) => t.trim())
+    .filter(Boolean);
 }
 
 function messagePreviewLabel(msgVal) {
@@ -597,12 +774,13 @@ const MessageBubble = defineComponent({
           >
             ⋯
           </button>
-          <div
-            v-show="actionsMenuOpen"
-            class="bubble-menu bubble-menu--rich"
-            role="menu"
-            @click.stop
-          >
+          <transition name="bubble-menu-pop">
+            <div
+              v-show="actionsMenuOpen"
+              class="bubble-menu bubble-menu--rich"
+              role="menu"
+              @click.stop
+            >
             <button type="button" role="menuitem" class="bubble-menu-row" @click="onReply">
               <span class="bubble-menu-ico" aria-hidden="true">↩</span>
               Reply
@@ -648,7 +826,8 @@ const MessageBubble = defineComponent({
               <span class="bubble-menu-ico" aria-hidden="true">✓</span>
               Select messages
             </button>
-          </div>
+            </div>
+          </transition>
         </div>
       </div>
       <div v-if="isOwn" class="bubble-avatar-aside" aria-hidden="true">
@@ -911,6 +1090,11 @@ const ChatView = defineComponent({
       pinsDiscoverSchema,
     );
 
+    const { objects: designVersionRawObjects } = useGraffitiDiscover(
+      DESIGN_VERSIONS_CHANNELS,
+      designVersionsDiscoverSchema,
+    );
+
     const { objects: profileObjects } = useGraffitiDiscover(
       PROFILES_CHANNELS,
       profileSchema,
@@ -919,6 +1103,16 @@ const ChatView = defineComponent({
     const profileIndex = computed(() =>
       profileIndexFromObjects(profileObjects.value),
     );
+
+    const designVersionsForChat = computed(() =>
+      mergeDesignVersions(
+        designVersionRawObjects.value.filter(
+          (o) => o.value?.chatId === props.chatId,
+        ),
+      ),
+    );
+
+    const designVersionCount = computed(() => designVersionsForChat.value.length);
 
     const thread = computed(() => {
       const hidden = hiddenLocalMessageIds.value;
@@ -1076,6 +1270,15 @@ const ChatView = defineComponent({
       }
     }
 
+    const sendBtnPulse = ref(false);
+
+    function pulseSendBtn() {
+      sendBtnPulse.value = true;
+      window.setTimeout(() => {
+        sendBtnPulse.value = false;
+      }, 280);
+    }
+
     async function send() {
       const text = content.value.trim();
       if (!text) return;
@@ -1084,6 +1287,7 @@ const ChatView = defineComponent({
         error.value = "Log in to send messages.";
         return;
       }
+      pulseSendBtn();
       const ok = await postSendMessage({
         type: "send_message",
         messageId: crypto.randomUUID(),
@@ -1283,6 +1487,27 @@ const ChatView = defineComponent({
       return displayAvatar(profileIndex.value, actor);
     }
 
+    const chatMessagesRef = ref(null);
+
+    function scrollMessagesToBottom() {
+      nextTick(() => {
+        const el = chatMessagesRef.value;
+        if (el) el.scrollTop = el.scrollHeight;
+      });
+    }
+
+    watch(
+      thread,
+      () => {
+        scrollMessagesToBottom();
+      },
+      { deep: true, flush: "post" },
+    );
+
+    onMounted(() => {
+      scrollMessagesToBottom();
+    });
+
     return {
       session,
       content,
@@ -1293,6 +1518,7 @@ const ChatView = defineComponent({
       headerPhotoUrl,
       headerInitial,
       thread,
+      chatMessagesRef,
       isFirstPoll,
       pinnedMessageIds,
       send,
@@ -1339,6 +1565,8 @@ const ChatView = defineComponent({
       onChatInfoSearchPick,
       chatInfoBusy,
       chatInfoError,
+      designVersionCount,
+      sendBtnPulse,
     };
   },
   template: `
@@ -1376,15 +1604,33 @@ const ChatView = defineComponent({
         </div>
       </header>
 
+      <router-link
+        :to="'/chat/' + chatId + '/versions'"
+        class="design-versions-entry"
+      >
+        <span class="design-versions-entry-icon" aria-hidden="true">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <rect x="3" y="12" width="14" height="9" rx="1.5" stroke="currentColor" stroke-width="1.6"/>
+            <rect x="6" y="7" width="14" height="9" rx="1.5" stroke="currentColor" stroke-width="1.6"/>
+            <rect x="9" y="2" width="14" height="9" rx="1.5" stroke="currentColor" stroke-width="1.6"/>
+          </svg>
+        </span>
+        <span class="design-versions-entry-label">Design Versions</span>
+        <span class="design-versions-entry-count">{{ designVersionCount }} versions</span>
+      </router-link>
+
       <div class="chat-messages-wrap">
         <p v-if="isFirstPoll && thread.length === 0" class="chat-messages-status">Loading messages…</p>
         <p v-else-if="thread.length === 0" class="chat-messages-status">No messages yet. Say hello below.</p>
-        <div v-else class="chat-messages">
+        <div v-else ref="chatMessagesRef" class="chat-messages">
           <div
             v-for="m in thread"
             :key="m.url"
             class="message-row"
-            :class="session?.actor === m.value.createdBy ? 'message-row--own' : 'message-row--other'"
+            :class="[
+              session?.actor === m.value.createdBy ? 'message-row--own' : 'message-row--other',
+              { 'message-row--menu-open': openActionsMessageId === m.value.messageId },
+            ]"
           >
             <MessageBubble
               :message="m"
@@ -1468,7 +1714,11 @@ const ChatView = defineComponent({
                 rows="1"
                 @keydown="onComposerKeydown"
               ></textarea>
-              <button type="submit" class="composer-send btn btn-primary" :disabled="busy">
+              <button
+                type="submit"
+                :class="['composer-send', 'btn', 'btn-primary', { 'btn-action-feedback': sendBtnPulse }]"
+                :disabled="busy"
+              >
                 {{ busy ? '…' : 'Send' }}
               </button>
             </form>
@@ -1961,6 +2211,853 @@ const PinnedMessagesView = defineComponent({
   `,
 });
 
+const DesignVersionsView = defineComponent({
+  name: "DesignVersionsView",
+  props: {
+    chatId: { type: String, required: true },
+  },
+  setup(props) {
+    const session = useGraffitiSession();
+    const graffiti = useGraffiti();
+    const router = useRouter();
+
+    const { objects: chatObjects } = useGraffitiDiscover(
+      CHATS_CHANNELS,
+      chatsChannelSchema,
+    );
+    const chatMeta = computed(() =>
+      mergeChatMeta(props.chatId, chatObjects.value),
+    );
+    const chatName = computed(() => chatMeta.value.name || "Chat");
+
+    const { objects: designVersionRawObjects } = useGraffitiDiscover(
+      DESIGN_VERSIONS_CHANNELS,
+      designVersionsDiscoverSchema,
+    );
+
+    const { objects: commentObjects } = useGraffitiDiscover(
+      DESIGN_COMMENTS_CHANNELS,
+      designCommentSchema,
+    );
+
+    const { objects: profileObjects } = useGraffitiDiscover(
+      PROFILES_CHANNELS,
+      profileSchema,
+    );
+
+    const profileIndex = computed(() =>
+      profileIndexFromObjects(profileObjects.value),
+    );
+
+    const versions = computed(() =>
+      mergeDesignVersions(
+        designVersionRawObjects.value.filter(
+          (o) => o.value?.chatId === props.chatId,
+        ),
+      ),
+    );
+
+    function formatDateTime(ts) {
+      if (ts == null) return "—";
+      try {
+        return new Date(ts).toLocaleString(undefined, {
+          dateStyle: "short",
+          timeStyle: "short",
+        });
+      } catch {
+        return "—";
+      }
+    }
+
+    function notesPreview(notes) {
+      const s = typeof notes === "string" ? notes.trim() : "";
+      if (!s) return "—";
+      return s.length > 140 ? s.slice(0, 137) + "…" : s;
+    }
+
+    function statusBadgeClass(status) {
+      if (status === "approved") return "version-status-badge version-status-badge--approved";
+      if (status === "needs_revision") return "version-status-badge version-status-badge--revision";
+      if (status === "archived") return "version-status-badge version-status-badge--archived";
+      return "version-status-badge version-status-badge--draft";
+    }
+
+    function statusLabel(status) {
+      if (status === "needs_revision") return "Needs revision";
+      if (status === "approved") return "Approved";
+      if (status === "archived") return "Archived";
+      return "Draft";
+    }
+
+    function statusIconKind(status) {
+      if (status === "approved") return "ok";
+      if (status === "needs_revision") return "warn";
+      return "";
+    }
+
+    function countComments(versionId) {
+      return commentCountForVersion(
+        commentObjects.value,
+        props.chatId,
+        versionId,
+      );
+    }
+
+    function labelFor(actor) {
+      return displayUser(profileIndex.value, actor);
+    }
+
+    function goBack() {
+      router.push("/chat/" + props.chatId);
+    }
+
+    const uploadOpen = ref(false);
+    const uploadTitle = ref("");
+    const uploadNotes = ref("");
+    const uploadStatus = ref("draft");
+    const uploadTags = ref("");
+    const uploadImagePreview = ref("");
+    const uploadBusy = ref(false);
+    const uploadError = ref("");
+    const uploadPublishPulse = ref(false);
+
+    function openUpload(prefillTitle) {
+      uploadError.value = "";
+      uploadTitle.value =
+        typeof prefillTitle === "string" ? prefillTitle : "";
+      uploadNotes.value = "";
+      uploadStatus.value = "draft";
+      uploadTags.value = "";
+      uploadImagePreview.value = "";
+      uploadOpen.value = true;
+    }
+
+    function closeUpload() {
+      uploadOpen.value = false;
+    }
+
+    async function onUploadImageChange(e) {
+      const input = e.target;
+      const file = input.files?.[0];
+      if (input) input.value = "";
+      if (!file) return;
+      if (file.size > MAX_ATTACHMENT_BYTES) {
+        uploadError.value = "Image must be under 2 MB.";
+        return;
+      }
+      uploadError.value = "";
+      try {
+        uploadImagePreview.value = await readFileAsDataUrl(file);
+      } catch (err) {
+        console.error(err);
+        uploadError.value = "Could not read the image.";
+      }
+    }
+
+    async function submitUpload() {
+      const s = session.value;
+      if (!s?.actor) {
+        uploadError.value = "Log in to upload.";
+        return;
+      }
+      const title = uploadTitle.value.trim();
+      if (!title) {
+        uploadError.value = "Enter a title.";
+        return;
+      }
+      if (!uploadImagePreview.value) {
+        uploadError.value = "Choose an image.";
+        return;
+      }
+      uploadPublishPulse.value = true;
+      window.setTimeout(() => {
+        uploadPublishPulse.value = false;
+      }, 280);
+      uploadBusy.value = true;
+      uploadError.value = "";
+      try {
+        await graffiti.post(
+          {
+            value: {
+              type: "create_design_version",
+              versionId: crypto.randomUUID(),
+              chatId: props.chatId,
+              title,
+              notes: uploadNotes.value.trim(),
+              imageDataUrl: uploadImagePreview.value,
+              status: uploadStatus.value,
+              tags: parseCommaTags(uploadTags.value),
+              createdAt: Date.now(),
+              createdBy: s.actor,
+            },
+            channels: DESIGN_VERSIONS_CHANNELS,
+          },
+          s,
+        );
+        uploadOpen.value = false;
+      } catch (e) {
+        console.error(e);
+        uploadError.value = "Could not upload. Try again.";
+      } finally {
+        uploadBusy.value = false;
+      }
+    }
+
+    return {
+      session,
+      chatName,
+      versions,
+      formatDateTime,
+      notesPreview,
+      statusBadgeClass,
+      statusLabel,
+      statusIconKind,
+      countComments,
+      labelFor,
+      goBack,
+      uploadOpen,
+      uploadTitle,
+      uploadNotes,
+      uploadStatus,
+      uploadTags,
+      uploadImagePreview,
+      uploadBusy,
+      uploadError,
+      uploadPublishPulse,
+      openUpload,
+      closeUpload,
+      onUploadImageChange,
+      submitUpload,
+    };
+  },
+  template: `
+    <div class="versions-page">
+      <header class="versions-header">
+        <div class="versions-header-top">
+          <button type="button" class="btn btn-ghost versions-back" @click="goBack" aria-label="Back to chat">
+            ← Back
+          </button>
+          <button
+            type="button"
+            class="btn btn-vers-primary versions-upload-header"
+            @click="openUpload()"
+          >
+            Upload New
+          </button>
+        </div>
+        <h1 class="versions-title">Design Versions</h1>
+        <p class="versions-subtitle">{{ chatName }}</p>
+      </header>
+
+      <div class="versions-body">
+        <p v-if="versions.length === 0" class="versions-empty">
+          No design versions yet. Upload the first version.
+        </p>
+        <ul v-else class="versions-list">
+          <li v-for="v in versions" :key="v.versionId">
+            <router-link
+              :to="'/chat/' + chatId + '/versions/' + v.versionId"
+              class="version-card"
+            >
+              <div class="version-thumb-wrap">
+                <img
+                  v-if="v.imageDataUrl"
+                  :src="v.imageDataUrl"
+                  alt=""
+                  class="version-thumb"
+                />
+                <div v-else class="version-thumb version-thumb--placeholder" aria-hidden="true">🖼</div>
+              </div>
+              <div class="version-card-main">
+                <div class="version-card-row1">
+                  <h2 class="version-card-title">{{ v.title }}</h2>
+                  <span v-if="statusIconKind(v.status)" class="version-card-status-ico" :class="'version-card-status-ico--' + statusIconKind(v.status)" aria-hidden="true">
+                    <template v-if="statusIconKind(v.status) === 'ok'">✓</template>
+                    <template v-else>!</template>
+                  </span>
+                </div>
+                <p class="version-card-time">{{ formatDateTime(v.createdAt) }}</p>
+                <p class="version-card-notes">{{ notesPreview(v.notes) }}</p>
+                <div class="version-card-meta">
+                  <span :class="statusBadgeClass(v.status)">{{ statusLabel(v.status) }}</span>
+                  <span class="version-card-comments">{{ countComments(v.versionId) }} comments</span>
+                  <span class="version-card-by">{{ labelFor(v.createdBy) }}</span>
+                </div>
+              </div>
+            </router-link>
+          </li>
+        </ul>
+      </div>
+
+      <div class="versions-footer">
+        <button type="button" class="btn btn-vers-primary btn-vers-primary--block" @click="openUpload()">
+          Upload New Version
+        </button>
+      </div>
+
+      <div
+        v-if="uploadOpen"
+        class="design-upload-overlay"
+        role="presentation"
+        @click.self="closeUpload"
+      >
+        <div class="design-upload-modal" role="dialog" aria-labelledby="dupload-title" @click.stop>
+          <h3 id="dupload-title" class="design-upload-title">Upload design version</h3>
+          <label class="design-upload-label">
+            Title
+            <input v-model="uploadTitle" type="text" class="design-upload-input" placeholder="Version title" autocomplete="off" />
+          </label>
+          <label class="design-upload-label">
+            Notes
+            <textarea v-model="uploadNotes" class="design-upload-textarea" rows="3" placeholder="Notes for reviewers"></textarea>
+          </label>
+          <label class="design-upload-label">
+            Image
+            <input type="file" accept="image/*" class="design-upload-file" @change="onUploadImageChange" />
+          </label>
+          <div v-if="uploadImagePreview" class="design-upload-preview-wrap">
+            <img :src="uploadImagePreview" alt="" class="design-upload-preview" />
+          </div>
+          <label class="design-upload-label">
+            Status
+            <select v-model="uploadStatus" class="design-upload-select">
+              <option value="draft">Draft</option>
+              <option value="needs_revision">Needs revision</option>
+              <option value="approved">Approved</option>
+              <option value="archived">Archived</option>
+            </select>
+          </label>
+          <label class="design-upload-label">
+            Tags (comma-separated)
+            <input v-model="uploadTags" type="text" class="design-upload-input" placeholder="fabric, trim, …" autocomplete="off" />
+          </label>
+          <p v-if="uploadError" class="design-upload-error">{{ uploadError }}</p>
+          <div class="design-upload-actions">
+            <button type="button" class="btn btn-ghost" @click="closeUpload">Cancel</button>
+            <button
+              type="button"
+              :class="['btn', 'btn-vers-primary', { 'btn-action-feedback': uploadPublishPulse }]"
+              :disabled="uploadBusy"
+              @click="submitUpload"
+            >
+              {{ uploadBusy ? 'Saving…' : 'Publish version' }}
+            </button>
+          </div>
+          <p v-if="session === null" class="design-upload-hint">Log in to publish.</p>
+        </div>
+      </div>
+    </div>
+  `,
+});
+
+const DesignVersionDetailView = defineComponent({
+  name: "DesignVersionDetailView",
+  props: {
+    chatId: { type: String, required: true },
+    versionId: { type: String, required: true },
+  },
+  setup(props) {
+    const session = useGraffitiSession();
+    const graffiti = useGraffiti();
+    const router = useRouter();
+
+    const { objects: chatObjects } = useGraffitiDiscover(
+      CHATS_CHANNELS,
+      chatsChannelSchema,
+    );
+    const chatMeta = computed(() =>
+      mergeChatMeta(props.chatId, chatObjects.value),
+    );
+    const chatName = computed(() => chatMeta.value.name || "Chat");
+
+    const { objects: designVersionRawObjects } = useGraffitiDiscover(
+      DESIGN_VERSIONS_CHANNELS,
+      designVersionsDiscoverSchema,
+    );
+
+    const { objects: commentObjects } = useGraffitiDiscover(
+      DESIGN_COMMENTS_CHANNELS,
+      designCommentSchema,
+    );
+
+    const { objects: profileObjects } = useGraffitiDiscover(
+      PROFILES_CHANNELS,
+      profileSchema,
+    );
+
+    const profileIndex = computed(() =>
+      profileIndexFromObjects(profileObjects.value),
+    );
+
+    const versions = computed(() =>
+      mergeDesignVersions(
+        designVersionRawObjects.value.filter(
+          (o) => o.value?.chatId === props.chatId,
+        ),
+      ),
+    );
+
+    const version = computed(() => {
+      const id = props.versionId;
+      return versions.value.find((v) => v.versionId === id) ?? null;
+    });
+
+    const chatComments = computed(() =>
+      commentObjects.value.filter((o) => o.value?.chatId === props.chatId),
+    );
+
+    const threadComments = computed(() =>
+      commentsForVersion(chatComments.value, props.versionId),
+    );
+
+    function formatDateTime(ts) {
+      if (ts == null) return "—";
+      try {
+        return new Date(ts).toLocaleString(undefined, {
+          dateStyle: "medium",
+          timeStyle: "short",
+        });
+      } catch {
+        return "—";
+      }
+    }
+
+    function formatCommentTime(ts) {
+      if (ts == null) return "";
+      try {
+        return new Date(ts).toLocaleString(undefined, {
+          hour: "numeric",
+          minute: "2-digit",
+          month: "short",
+          day: "numeric",
+        });
+      } catch {
+        return "";
+      }
+    }
+
+    function statusBadgeClass(status) {
+      if (status === "approved") return "version-status-badge version-status-badge--approved";
+      if (status === "needs_revision") return "version-status-badge version-status-badge--revision";
+      if (status === "archived") return "version-status-badge version-status-badge--archived";
+      return "version-status-badge version-status-badge--draft";
+    }
+
+    function statusLabel(status) {
+      if (status === "needs_revision") return "Needs revision";
+      if (status === "approved") return "Approved";
+      if (status === "archived") return "Archived";
+      return "Draft";
+    }
+
+    function labelFor(actor) {
+      return displayUser(profileIndex.value, actor);
+    }
+
+    function avatarFor(actor) {
+      return displayAvatar(profileIndex.value, actor);
+    }
+
+    function goBack() {
+      router.push("/chat/" + props.chatId + "/versions");
+    }
+
+    const commentText = ref("");
+    const commentBusy = ref(false);
+    const commentError = ref("");
+    const commentSendPulse = ref(false);
+
+    async function sendComment() {
+      const s = session.value;
+      if (!s?.actor) {
+        commentError.value = "Log in to comment.";
+        return;
+      }
+      const text = commentText.value.trim();
+      if (!text) return;
+      if (!version.value) return;
+      commentSendPulse.value = true;
+      window.setTimeout(() => {
+        commentSendPulse.value = false;
+      }, 280);
+      commentBusy.value = true;
+      commentError.value = "";
+      try {
+        await graffiti.post(
+          {
+            value: {
+              type: "create_design_comment",
+              commentId: crypto.randomUUID(),
+              versionId: props.versionId,
+              chatId: props.chatId,
+              content: text,
+              createdAt: Date.now(),
+              createdBy: s.actor,
+            },
+            channels: DESIGN_COMMENTS_CHANNELS,
+          },
+          s,
+        );
+        commentText.value = "";
+      } catch (e) {
+        console.error(e);
+        commentError.value = "Comment could not be sent.";
+      } finally {
+        commentBusy.value = false;
+      }
+    }
+
+    const statusBusy = ref(false);
+
+    async function markFinal() {
+      const s = session.value;
+      if (!s?.actor || !version.value) return;
+      statusBusy.value = true;
+      try {
+        await graffiti.post(
+          {
+            value: {
+              type: "update_design_version_status",
+              versionId: props.versionId,
+              chatId: props.chatId,
+              status: "approved",
+              updatedAt: Date.now(),
+              updatedBy: s.actor,
+            },
+            channels: DESIGN_VERSIONS_CHANNELS,
+          },
+          s,
+        );
+      } catch (e) {
+        console.error(e);
+      } finally {
+        statusBusy.value = false;
+      }
+    }
+
+    const uploadOpen = ref(false);
+    const uploadTitle = ref("");
+    const uploadNotes = ref("");
+    const uploadStatus = ref("draft");
+    const uploadTags = ref("");
+    const uploadImagePreview = ref("");
+    const uploadBusy = ref(false);
+    const uploadError = ref("");
+    const uploadPublishPulse = ref(false);
+
+    function openRevisionUpload() {
+      const v = version.value;
+      uploadError.value = "";
+      uploadTitle.value = v ? "Revision — " + (v.title || "Untitled") : "";
+      uploadNotes.value = "";
+      uploadStatus.value = "draft";
+      uploadTags.value = Array.isArray(v?.tags) ? v.tags.join(", ") : "";
+      uploadImagePreview.value = "";
+      uploadOpen.value = true;
+    }
+
+    function closeUpload() {
+      uploadOpen.value = false;
+    }
+
+    async function onUploadImageChange(e) {
+      const input = e.target;
+      const file = input.files?.[0];
+      if (input) input.value = "";
+      if (!file) return;
+      if (file.size > MAX_ATTACHMENT_BYTES) {
+        uploadError.value = "Image must be under 2 MB.";
+        return;
+      }
+      uploadError.value = "";
+      try {
+        uploadImagePreview.value = await readFileAsDataUrl(file);
+      } catch (err) {
+        console.error(err);
+        uploadError.value = "Could not read the image.";
+      }
+    }
+
+    async function submitUpload() {
+      const s = session.value;
+      if (!s?.actor) {
+        uploadError.value = "Log in to upload.";
+        return;
+      }
+      const title = uploadTitle.value.trim();
+      if (!title) {
+        uploadError.value = "Enter a title.";
+        return;
+      }
+      if (!uploadImagePreview.value) {
+        uploadError.value = "Choose an image.";
+        return;
+      }
+      uploadPublishPulse.value = true;
+      window.setTimeout(() => {
+        uploadPublishPulse.value = false;
+      }, 280);
+      uploadBusy.value = true;
+      uploadError.value = "";
+      const newVid = crypto.randomUUID();
+      try {
+        await graffiti.post(
+          {
+            value: {
+              type: "create_design_version",
+              versionId: newVid,
+              chatId: props.chatId,
+              title,
+              notes: uploadNotes.value.trim(),
+              imageDataUrl: uploadImagePreview.value,
+              status: uploadStatus.value,
+              tags: parseCommaTags(uploadTags.value),
+              createdAt: Date.now(),
+              createdBy: s.actor,
+            },
+            channels: DESIGN_VERSIONS_CHANNELS,
+          },
+          s,
+        );
+        uploadOpen.value = false;
+        router.replace("/chat/" + props.chatId + "/versions/" + newVid);
+      } catch (e) {
+        console.error(e);
+        uploadError.value = "Could not upload. Try again.";
+      } finally {
+        uploadBusy.value = false;
+      }
+    }
+
+    return {
+      session,
+      chatName,
+      version,
+      threadComments,
+      formatDateTime,
+      formatCommentTime,
+      statusBadgeClass,
+      statusLabel,
+      labelFor,
+      avatarFor,
+      goBack,
+      commentText,
+      commentBusy,
+      commentError,
+      commentSendPulse,
+      sendComment,
+      markFinal,
+      statusBusy,
+      uploadOpen,
+      uploadTitle,
+      uploadNotes,
+      uploadStatus,
+      uploadTags,
+      uploadImagePreview,
+      uploadBusy,
+      uploadError,
+      uploadPublishPulse,
+      openRevisionUpload,
+      closeUpload,
+      onUploadImageChange,
+      submitUpload,
+    };
+  },
+  template: `
+    <div class="version-detail-page">
+      <header class="versions-header version-detail-header">
+        <div class="versions-header-top">
+          <button type="button" class="btn btn-ghost versions-back" @click="goBack" aria-label="Back to versions">
+            ← Back
+          </button>
+          <button type="button" class="version-menu-btn" aria-label="Menu" @click.stop>
+            ⋯
+          </button>
+        </div>
+        <template v-if="version">
+          <h1 class="versions-title version-detail-title">{{ version.title }}</h1>
+          <p class="versions-subtitle">{{ formatDateTime(version.createdAt) }}</p>
+        </template>
+        <template v-else>
+          <h1 class="versions-title version-detail-title">Version</h1>
+          <p class="versions-subtitle">{{ chatName }}</p>
+        </template>
+      </header>
+
+      <div v-if="!version" class="versions-body">
+        <p class="versions-empty">This design version was not found.</p>
+        <button type="button" class="btn btn-vers-primary" @click="goBack">Back to list</button>
+      </div>
+
+      <template v-else>
+        <div class="version-hero">
+          <img
+            v-if="version.imageDataUrl"
+            :src="version.imageDataUrl"
+            alt=""
+            class="version-hero-img"
+          />
+          <div v-else class="version-hero-placeholder" aria-hidden="true">No image</div>
+        </div>
+
+        <div class="version-detail-body">
+          <section class="version-detail-section">
+            <h3 class="version-detail-k">Status</h3>
+            <span :class="statusBadgeClass(version.status)">{{ statusLabel(version.status) }}</span>
+          </section>
+
+          <section class="version-detail-section">
+            <h3 class="version-detail-k">Uploaded by</h3>
+            <div class="version-uploader">
+              <div class="version-uploader-ava">
+                <img
+                  v-if="avatarFor(version.createdBy).photoUrl"
+                  :src="avatarFor(version.createdBy).photoUrl"
+                  alt=""
+                  class="version-uploader-img"
+                />
+                <span v-else class="version-uploader-init">{{ avatarFor(version.createdBy).initial }}</span>
+              </div>
+              <span class="version-uploader-name">{{ labelFor(version.createdBy) }}</span>
+            </div>
+          </section>
+
+          <section class="version-detail-section">
+            <h3 class="version-detail-k">Notes</h3>
+            <p class="version-detail-notes">{{ version.notes || '—' }}</p>
+          </section>
+
+          <section class="version-detail-section">
+            <h3 class="version-detail-k">Feedback tags</h3>
+            <div v-if="version.tags && version.tags.length" class="feedback-tags">
+              <span v-for="(t, i) in version.tags" :key="'tg-' + i" class="feedback-tag">{{ t }}</span>
+            </div>
+            <p v-else class="version-detail-muted">No tags</p>
+          </section>
+
+          <section class="version-detail-section version-comments-section">
+            <h3 class="version-detail-k">Comments</h3>
+            <ul v-if="threadComments.length" class="version-comment-list">
+              <li v-for="c in threadComments" :key="c.value.commentId" class="version-comment-card">
+                <div class="version-comment-ava">
+                  <img
+                    v-if="avatarFor(c.value.createdBy).photoUrl"
+                    :src="avatarFor(c.value.createdBy).photoUrl"
+                    alt=""
+                    class="version-comment-img"
+                  />
+                  <span v-else class="version-comment-init">{{ avatarFor(c.value.createdBy).initial }}</span>
+                </div>
+                <div class="version-comment-body">
+                  <div class="version-comment-top">
+                    <span class="version-comment-name">{{ labelFor(c.value.createdBy) }}</span>
+                    <span class="version-comment-time">{{ formatCommentTime(c.value.createdAt) }}</span>
+                  </div>
+                  <p class="version-comment-text">{{ c.value.content }}</p>
+                </div>
+              </li>
+            </ul>
+            <p v-else class="version-detail-muted">No comments yet.</p>
+          </section>
+        </div>
+
+        <div class="version-bottom-actions">
+          <button
+            type="button"
+            class="btn btn-vers-primary btn-vers-primary--grow"
+            :disabled="!session?.actor || statusBusy || version.status === 'approved'"
+            @click="markFinal"
+          >
+            {{ statusBusy ? '…' : 'Mark as Final' }}
+          </button>
+          <button
+            type="button"
+            class="btn btn-ghost btn-vers-outline btn-vers-primary--grow"
+            @click="openRevisionUpload"
+          >
+            Upload Revision
+          </button>
+        </div>
+
+        <div class="version-comment-composer">
+          <p v-if="session === null" class="design-upload-hint">Log in to add a comment.</p>
+          <template v-else>
+            <input
+              v-model="commentText"
+              type="text"
+              class="version-comment-input"
+              placeholder="Add a comment…"
+              autocomplete="off"
+              @keydown.enter.prevent="sendComment"
+            />
+            <button
+              type="button"
+              :class="['btn', 'btn-vers-primary', 'version-comment-send', { 'btn-action-feedback': commentSendPulse }]"
+              :disabled="commentBusy || !commentText.trim()"
+              @click="sendComment"
+            >
+              Send
+            </button>
+          </template>
+          <p v-if="commentError" class="design-upload-error">{{ commentError }}</p>
+        </div>
+      </template>
+
+      <div
+        v-if="uploadOpen"
+        class="design-upload-overlay"
+        role="presentation"
+        @click.self="closeUpload"
+      >
+        <div class="design-upload-modal" role="dialog" aria-labelledby="dupload-detail-title" @click.stop>
+          <h3 id="dupload-detail-title" class="design-upload-title">Upload revision</h3>
+          <label class="design-upload-label">
+            Title
+            <input v-model="uploadTitle" type="text" class="design-upload-input" placeholder="Version title" autocomplete="off" />
+          </label>
+          <label class="design-upload-label">
+            Notes
+            <textarea v-model="uploadNotes" class="design-upload-textarea" rows="3" placeholder="Notes for reviewers"></textarea>
+          </label>
+          <label class="design-upload-label">
+            Image
+            <input type="file" accept="image/*" class="design-upload-file" @change="onUploadImageChange" />
+          </label>
+          <div v-if="uploadImagePreview" class="design-upload-preview-wrap">
+            <img :src="uploadImagePreview" alt="" class="design-upload-preview" />
+          </div>
+          <label class="design-upload-label">
+            Status
+            <select v-model="uploadStatus" class="design-upload-select">
+              <option value="draft">Draft</option>
+              <option value="needs_revision">Needs revision</option>
+              <option value="approved">Approved</option>
+              <option value="archived">Archived</option>
+            </select>
+          </label>
+          <label class="design-upload-label">
+            Tags (comma-separated)
+            <input v-model="uploadTags" type="text" class="design-upload-input" placeholder="fabric, trim, …" autocomplete="off" />
+          </label>
+          <p v-if="uploadError" class="design-upload-error">{{ uploadError }}</p>
+          <div class="design-upload-actions">
+            <button type="button" class="btn btn-ghost" @click="closeUpload">Cancel</button>
+            <button
+              type="button"
+              :class="['btn', 'btn-vers-primary', { 'btn-action-feedback': uploadPublishPulse }]"
+              :disabled="uploadBusy"
+              @click="submitUpload"
+            >
+              {{ uploadBusy ? 'Saving…' : 'Publish version' }}
+            </button>
+          </div>
+          <p v-if="session === null" class="design-upload-hint">Log in to publish.</p>
+        </div>
+      </div>
+    </div>
+  `,
+});
+
 const AboutView = defineComponent({
   name: "AboutView",
   template: `
@@ -2141,6 +3238,47 @@ const App = defineComponent({
       sidebarFilter.value = v;
     }
 
+    /** Sidebar list flash when search/filter updates (short UI feedback). */
+    const sidebarListFlash = ref(false);
+    let sidebarListFlashTimer = null;
+    let sidebarSearchFlashDebounce = null;
+
+    function triggerSidebarListFlash() {
+      if (sidebarListFlashTimer != null) {
+        clearTimeout(sidebarListFlashTimer);
+        sidebarListFlashTimer = null;
+      }
+      sidebarListFlash.value = false;
+      nextTick(() => {
+        sidebarListFlash.value = true;
+        sidebarListFlashTimer = window.setTimeout(() => {
+          sidebarListFlash.value = false;
+          sidebarListFlashTimer = null;
+        }, 380);
+      });
+    }
+
+    watch(sidebarFilter, () => {
+      triggerSidebarListFlash();
+    });
+
+    watch(sidebarSearch, () => {
+      if (sidebarSearchFlashDebounce != null) {
+        clearTimeout(sidebarSearchFlashDebounce);
+      }
+      sidebarSearchFlashDebounce = window.setTimeout(() => {
+        sidebarSearchFlashDebounce = null;
+        triggerSidebarListFlash();
+      }, 420);
+    });
+
+    onBeforeUnmount(() => {
+      if (sidebarListFlashTimer != null) clearTimeout(sidebarListFlashTimer);
+      if (sidebarSearchFlashDebounce != null) {
+        clearTimeout(sidebarSearchFlashDebounce);
+      }
+    });
+
     async function onLogin() {
       await graffiti.login();
     }
@@ -2235,6 +3373,7 @@ const App = defineComponent({
       isGroupChatRow,
       sidebarChatMeta,
       setSidebarFilter,
+      sidebarListFlash,
     };
   },
   template: `
@@ -2320,7 +3459,7 @@ const App = defineComponent({
           <p v-if="isFirstPoll && chats.length === 0" class="sidebar-hint">Loading chats…</p>
           <p v-else-if="chats.length === 0" class="sidebar-hint">No chats yet. Use New Chat.</p>
           <p v-else-if="visibleChats.length === 0" class="sidebar-hint">{{ sidebarEmptyHint }}</p>
-          <ul v-else class="chat-list">
+          <ul v-else class="chat-list" :class="{ 'sidebar-list--flash': sidebarListFlash }">
             <li v-for="obj in visibleChats" :key="obj.url">
               <router-link
                 :to="'/chat/' + obj.value.chatId"
@@ -2446,6 +3585,18 @@ const router = createRouter({
   routes: [
     { path: "/", name: "home", component: HomeView },
     { path: "/newchat", name: "newchat", component: NewChatView },
+    {
+      path: "/chat/:chatId/versions/:versionId",
+      name: "design-version-detail",
+      component: DesignVersionDetailView,
+      props: true,
+    },
+    {
+      path: "/chat/:chatId/versions",
+      name: "design-versions",
+      component: DesignVersionsView,
+      props: true,
+    },
     {
       path: "/chat/:chatId/pins",
       name: "chat-pins",
